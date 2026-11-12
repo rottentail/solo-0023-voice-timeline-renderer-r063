@@ -156,6 +156,8 @@ Errors use a JSON envelope:
 | `audiocodec` | WAV parsing and encoding, resampling, channel mapping, signal metrics |
 | `render` | Span evaluation, crossfade mixing, normalization, receipt construction |
 | `storage` | Atomic source, timeline, job, output, and receipt persistence |
+| `checkflow` | Bounded generation, resource guardian, parallel isolated execution, delta reduction, replay artifacts |
+| `oracle` | Standard-library-only independent signal, coordinate, and quantized-fact verifier |
 
 ## Engineering mechanisms
 
@@ -178,4 +180,63 @@ The runtime manifest exposes one bounded production smoke path per workflow:
   receipt measurements.
 
 These checks use the real HTTP entry points and local storage. They are not a
-replacement for the test suite that the later task stage will add.
+replacement for the test suite.
+
+## Bounded verification and reduction mechanism
+
+The `fuzz-audit` workflow extends validation to large volumes of mixed sample
+rates and overlap relations while keeping the process inside a 256 MiB RSS
+budget. It addresses the case where retaining every generated sample exhausts
+the checker's memory, while naive truncation would discard the fractional
+sample landing points or destructive-cancellation relations that carry an
+error.
+
+### Independent oracle
+
+`internal/oracle` depends only on the Go standard library and imports no
+production package. It parses WAV containers, resamples, maps channels, mixes
+equal-power crossfades, normalizes, and quantizes independently, then renders
+three separate verdicts:
+
+1. signal: dequantized amplitudes versus the independent float64 expectation,
+   bounded by a principled float32-envelope-plus-one-quantization-bin tolerance
+   with an ambiguity-rate guard;
+2. coordinates: exact integer frame geometry from source intervals through
+   rate conversion to receipt span placement;
+3. quantized facts: actual int16 values, saturation rails, header facts, and
+   digest, accepting an adjacent bin only within the quantization-boundary
+   envelope.
+
+Production-convention differences (such as render-receipt duration
+truncation) are recorded as observations unless strict convention mode is
+enabled. Tolerances are never widened to satisfy the memory budget, and a
+crash-only strategy is not used.
+
+### Bounded resources
+
+Structural generator caps bound source WAV size, span count, and output frame
+count; large legal projects are still generated on a fixed cadence and fully
+verified. A budget guardian sets `GOMEMLIMIT` below the RSS ceiling, forces GC
+at a soft trigger, and applies back-pressure rather than dropping candidates.
+Passing candidates are retained only as slim seals and verdicts, so the
+generated corpus never accumulates in process memory.
+
+### Parallel isolation
+
+Each worker owns a private data directory and HTTP harness. Source, timeline,
+and render identifiers are globally unique by construction. A post-run seal
+audit fails the run if any render id is reused, any source id appears with
+conflicting payloads, or a receipt is bound to another candidate's render or
+timeline. Candidates therefore cannot cross-use receipts or inputs.
+
+### Failure reduction and replay
+
+On a violation, a delta-debugging reducer removes span chunks while repairing
+crossfade validity, narrows source intervals toward the violating frame, drops
+unreferenced sources, and trims source WAV payloads to referenced frames. A
+shrink is accepted only when the same `plane:code` failure signature still
+reproduces through the real HTTP workflow, preserving the signal violation.
+The minimized artifact bundles the exact minimal source WAVs, reduced
+timeline, violation report, seals, and replay instructions; the
+`replay-artifact` workflow re-executes it against a fresh service and asserts
+the same signature. The production rendering algorithm is not modified.

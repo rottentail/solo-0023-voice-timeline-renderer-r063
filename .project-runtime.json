@@ -5,7 +5,8 @@
     ".go"
   ],
   "build_command": "go build ./...",
-  "testing": "deferred",
+  "test_command": "go test ./...",
+  "testing": "implemented",
   "workflow_checks": [
     {
       "workflow_id": "ingest-audio-source",
@@ -18,6 +19,14 @@
     {
       "workflow_id": "render-mixdown",
       "command": "go run ./cmd/timelinecheck -workflow render-mixdown"
+    },
+    {
+      "workflow_id": "fuzz-audit",
+      "command": "go run ./cmd/timelinecheck -workflow fuzz-audit -candidates 96 -workers 2"
+    },
+    {
+      "workflow_id": "replay-artifact",
+      "command": "go run ./cmd/timelinecheck -workflow replay-artifact -artifact <manifest.json>"
     }
   ]
 }

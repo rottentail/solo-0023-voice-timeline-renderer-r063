@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"time"
 
 	"voice-timeline-renderer/internal/audiocodec"
 	"voice-timeline-renderer/internal/domain"
@@ -14,21 +15,67 @@ import (
 )
 
 func Run(ctx context.Context, workflow string) error {
-	harness, err := NewHarness()
-	if err != nil {
-		return err
-	}
-	defer harness.Close()
-
 	switch workflow {
 	case "ingest-audio-source":
+		harness, err := NewHarness()
+		if err != nil {
+			return err
+		}
+		defer harness.Close()
 		return runIngest(ctx, harness)
 	case "compose-timeline":
+		harness, err := NewHarness()
+		if err != nil {
+			return err
+		}
+		defer harness.Close()
 		return runCompose(ctx, harness)
 	case "render-mixdown":
+		harness, err := NewHarness()
+		if err != nil {
+			return err
+		}
+		defer harness.Close()
 		return runRender(ctx, harness)
 	default:
 		return fmt.Errorf("unknown workflow %q", workflow)
+	}
+}
+
+// RunAuditWorkflow executes the bounded mixed-rate fuzz-and-reduce audit.
+func RunAuditWorkflow(ctx context.Context, candidates, workers int, seed uint64, artifactDir string) error {
+	stats, err := RunAudit(ctx, AuditConfig{
+		Candidates:           candidates,
+		Workers:              workers,
+		Seed:                 seed,
+		ArtifactDir:          artifactDir,
+		Generator:            DefaultGeneratorConfig(),
+		MaxReductionAttempts: 64,
+	})
+	printAuditStats(stats)
+	return err
+}
+
+// RunReplayWorkflow replays a minimized violation artifact.
+func RunReplayWorkflow(ctx context.Context, manifestPath string) error {
+	report, err := ReplayArtifact(ctx, manifestPath)
+	if err != nil {
+		return err
+	}
+	first, _ := report.FirstViolation()
+	fmt.Printf("replay reproduced %s: %s\n", first.Signature(), first.Detail)
+	return nil
+}
+
+func printAuditStats(stats AuditStats) {
+	fmt.Printf("audit: generated=%d passed=%d failed=%d large=%d/%d high_water_rss=%dMiB ceiling=%dMiB backpressure=%d elapsed=%s\n",
+		stats.Generated, stats.Passed, stats.Failed, stats.LargePassed, stats.LargeGenerated,
+		stats.HighWaterRSS>>20, stats.RSSCeiling>>20, stats.BackpressureHits, stats.Elapsed.Round(time.Millisecond))
+	if stats.ArtifactPath != "" {
+		fmt.Printf("audit: minimized replay artifact at %s\n", stats.ArtifactPath)
+	}
+	for _, violation := range stats.SealViolations {
+		fmt.Printf("audit SEAL VIOLATION: %s\n", violation)
 	}
 }
 

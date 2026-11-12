@@ -169,15 +169,76 @@ by rename.
 
 ```text
 cmd/voiceservice/       service entry point
-cmd/timelinecheck/      workflow execution entry point
+cmd/timelinecheck/      workflow, fuzz-audit, and artifact-replay entry point
 internal/httpapi/       routing, request limits, JSON errors, media response
 internal/service/       workflow orchestration and idempotency
 internal/domain/        entities, validation, errors, and render transitions
 internal/audiocodec/    WAV handling, transforms, and signal measurement
 internal/render/        timeline preparation, mixing, normalization, receipt
 internal/storage/       atomic local repository
-internal/checkflow/     bounded production workflow checks
+internal/checkflow/     bounded workflow checks, fuzzing, reduction, artifacts
+internal/oracle/        independent render verifier (standard library only)
 ```
+
+## Bounded fuzz audit and signal-violation reduction
+
+The `fuzz-audit` workflow continuously generates bounded projects that mix
+nine sample rates (8 kHz through 96 kHz), mono/stereo layouts, fractional
+frame-landing intervals, and equal-power crossfade overlaps including
+phase-inverted cancellation material. Every project runs through the real HTTP
+entry points and is checked by the independent `internal/oracle` verifier,
+which shares no code with the production renderer or codec.
+
+The verifier checks three separate planes rather than one loose comparison:
+
+- **signal** — dequantized output amplitudes against an independently
+  resampled, mixed, gain-scaled, and normalized float64 expectation;
+- **coordinates** — exact integer frame geometry: scaled span lengths,
+  crossfade overlap, and absolute output start/end placement on the receipt;
+- **quantized_facts** — the actual int16 sample values, saturation rails, WAV
+  header facts, and the output digest. Values within a conservative float32
+  envelope of a quantization boundary accept the adjacent bin; every other
+  sample must match exactly, and an ambiguity-rate guard stops the envelope
+  from hiding real divergence.
+
+Resource bounds are structural, not achieved by relaxing tolerances, keeping
+only crashes, or stopping generation of large legal projects:
+
+- the process installs `GOMEMLIMIT` under a 256 MiB RSS ceiling and a soft
+  trigger at 78%; the guardian forces GC and applies back-pressure while
+  pressure remains, and never drops a candidate;
+- generator caps bound each source WAV, span count, and output length, while
+  large legal projects are generated on a fixed cadence and fully verified;
+- passing candidates are reduced to slim seals and verdicts, so the full
+  generated corpus is never retained in memory.
+
+Parallel workers run against isolated data directories with globally unique
+source, timeline, and render identifiers. A post-run seal audit proves no
+candidate reused another candidate's input or received another candidate's
+receipt.
+
+When the oracle finds a violation, a delta-debugging reducer shrinks the span
+list (repairing crossfade validity), narrows source intervals toward the
+violating frame, drops unreferenced sources, and trims source WAV payloads to
+the referenced frames. A shrink is accepted only when the same `plane:code`
+signature still fails, so fractional landing points and destructive
+cancellation relations are preserved. The result is a self-contained artifact
+directory with the minimal source WAVs, reduced timeline, violation report,
+isolation seals, and replay instructions.
+
+Run the bounded audit and replay an artifact:
+
+```bash
+go run ./cmd/timelinecheck -workflow fuzz-audit -candidates 96 -workers 2 -seed 20261112
+go run ./cmd/timelinecheck -workflow replay-artifact -artifact ./var/audit-artifacts/<bundle>/manifest.json
+```
+
+Flags: `-candidates`, `-workers`, `-seed`, `-artifact-dir`, and `-artifact`.
+A minimized violation exits with status 2 (a finding, distinct from a harness
+error on status 1). The oracle's documented production-convention
+observations (for example the render-receipt duration truncation convention)
+do not fail the run; strict convention mode is available on the verifier for
+explicitly opt-in enforcement.
 
 ## Workflow checks
 
@@ -187,16 +248,21 @@ Run each declared production check from the repository root:
 go run ./cmd/timelinecheck -workflow ingest-audio-source
 go run ./cmd/timelinecheck -workflow compose-timeline
 go run ./cmd/timelinecheck -workflow render-mixdown
+go run ./cmd/timelinecheck -workflow fuzz-audit
 ```
 
 Each check creates an isolated temporary data directory, starts the real HTTP
 handler, sends generated WAV inputs, and verifies read-back or rendered output.
 The checks are bounded and do not require network access.
 
-## Deferred test boundary
+## Tests
 
-This baseline contains no unit tests, test fixtures, browser checks, or
-`test_command`. The downstream task stage owns test creation and red/green
-verification. It should extend coverage around WAV chunk edge cases, timeline
-crossfade bounds, failed job cleanup, concurrent idempotency, and HTTP error
-mapping.
+```bash
+go test ./...
+go test -race ./...
+```
+
+The oracle and checkflow packages contain unit and integration tests covering
+independent WAV parsing, resampling, crossfade mixing, three-plane violation
+detection, generator bounds, budget back-pressure, parallel isolation seals,
+and the failure-to-reduction-to-replay path.

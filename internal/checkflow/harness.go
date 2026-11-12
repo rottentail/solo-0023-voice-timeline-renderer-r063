@@ -28,6 +28,20 @@ func NewHarness() (*Harness, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newHarnessAt(tempDir)
+}
+
+// NewIsolatedHarness builds a harness rooted at a caller-owned directory.
+// Parallel candidates use distinct roots so storage, media, receipts, and job
+// records can never be shared or swapped across candidates.
+func NewIsolatedHarness(root string) (*Harness, error) {
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		return nil, err
+	}
+	return newHarnessAt(root)
+}
+
+func newHarnessAt(tempDir string) (*Harness, error) {
 	repo, err := storage.NewRepository(tempDir)
 	if err != nil {
 		_ = os.RemoveAll(tempDir)
@@ -50,6 +64,16 @@ func NewHarness() (*Harness, error) {
 func (harness *Harness) Close() {
 	harness.server.Close()
 	_ = os.RemoveAll(harness.tempDir)
+}
+
+// Root reports the on-disk data directory backing this harness.
+func (harness *Harness) Root() string { return harness.tempDir }
+
+// Detach stops the HTTP server without deleting the data directory. It is used
+// when a failure artifact must preserve the exact sources and timeline that
+// reproduced a violation.
+func (harness *Harness) Detach() {
+	harness.server.Close()
 }
 
 func (harness *Harness) requestJSON(
